@@ -1,85 +1,178 @@
 require 'loadcaffe';
+require 'nn';
 require 'cunn'
 require 'cudnn'
-require 'nn';
+
 require 'image';
 npy4th=require 'npy4th'
 
+function makeXavierGaussian(model)
+    for idx=1,#model do
+        local m = model.modules[idx]
+        if m.weight then
+            local var=nil;
+            if m.__typename == 'nn.SpatialConvolution' then
+                var = {m.nInputPlane*m.kH*m.kW, m.nOutputPlane*m.kH*m.kW}
+            elseif m.__typename == 'nn.SpatialConvolutionMM' then
+                var = {m.nInputPlane*m.kH*m.kW, m.nOutputPlane*m.kH*m.kW}
+            elseif m.__typename == 'nn.LateralConvolution' then
+                var = {m.nInputPlane*1*1, m.nOutputPlane*1*1}
+            elseif m.__typename == 'nn.VerticalConvolution' then
+                var = {1*m.kH*m.kW, 1*m.kH*m.kW}
+            elseif m.__typename == 'nn.HorizontalConvolution' then
+                var = {1*m.kH*m.kW, 1*m.kH*m.kW}
+            elseif m.__typename == 'nn.Linear' then
+                var = {m.weight:size(2), m.weight:size(1)}
+            elseif m.__typename == 'nn.TemporalConvolution' then
+                var = {m.weight:size(2), m.weight:size(1)}
+            end
+            if var then
+	            var = 2/(var[1] + var[2])
+	            m.weight=torch.randn(m.weight:size()):mul(torch.sqrt(var));
+	            m.bias=torch.zeros(m.bias:size());
+	        end
+        end
+    end
+    return model
+end
 
-local path_caffe_alexnet='../models/alexnet_cvgj_iter_320000.caffemodel';
-local path_deploy='../models/deploy.prototxt';
-local model = loadcaffe.load(path_deploy,path_caffe_alexnet, 'cudnn')
-
-model=cudnn.convert(model,cudnn);
-model:insert(nn.BatchNormalization(4096,1e-5,0.9,false),18);
-model:insert(nn.BatchNormalization(4096,1e-5,0.9,false),16);
-model:insert(nn.SpatialBatchNormalization(256,1e-5,0.9,false),12);
-model:insert(nn.SpatialBatchNormalization(384,1e-5,0.9,false),10);
-model:insert(nn.SpatialBatchNormalization(384,1e-5,0.9,false),8);
-model:insert(nn.SpatialBatchNormalization(256,1e-5,0.9,false),5);
-model:insert(nn.SpatialBatchNormalization(96,1e-5,0.9,false),2);
-model:insert(nn.CAdd(1,3,1,1),1);
-model:insert(nn.CMul(1,3,1,1),1);
-model:insert(nn.SpatialBatchNormalization(3,1e-5,0.9,false),1);
-model:add(nn.SoftMax());
-
-
-print (model);
-
-local path_dir='../models';
-local pre_path='alexnet_';
-local file_names={'data_bn','data_scale','conv1_bn','conv2_bn','conv3_bn','conv4_bn','conv5_bn','fc6_bn','fc7_bn'};
-local idx_layers={1,2,5,9,13,16,19,24,27}
-for idx_file_name,file_name in ipairs(file_names) do
-
-	local idx_layer=idx_layers[idx_file_name];
-	local weight_file=paths.concat(path_dir,pre_path..file_name..'_weights.npy');
-	local bias_file=paths.concat(path_dir,pre_path..file_name..'_bias.npy');
-	local ma_file=paths.concat(path_dir,pre_path..file_name..'_avg.npy');
-	
-	local weights=npy4th.loadnpy(weight_file);
-	local bias=npy4th.loadnpy(bias_file);
-
-	if idx_layer==2 then
-		weights=weights:resize(1,3,1,1);
-		bias=bias:resize(1,3,1,1);
-		model:get(idx_layer).weight=weights:clone();
-		model:get(idx_layer+1).bias=bias:clone();
-	else
-		assert (model:get(idx_layer).running_mean:size(1)==weights:size(1));
-		assert (model:get(idx_layer).running_var:size(1)==bias:size(1));
-		
-		ma=npy4th.loadnpy(ma_file);
-		model:get(idx_layer).running_mean=weights:double():div(ma[1])
-		model:get(idx_layer).running_var=bias:double():div(ma[1])
+function getAlexNetModel(path_caffe_alexnet,path_deploy,path_dir,pre_path)
+	local path_caffe_alexnet=path_caffe_alexnet;
+	local path_deploy=path_deploy;
+	local path_dir=path_dir;
+	local pre_path=pre_path;
+	if not path_dir then
+		path_dir='../models'
 	end
+	if not pre_path then
+		pre_path='alexnet_'
+	end
+	if not path_caffe_alexnet then
+		path_caffe_alexnet='../models/alexnet_cvgj_iter_320000.caffemodel';
+	end
+	if not path_deploy then
+		path_deploy='../models/deploy.prototxt';
+	end
+
+	local model = loadcaffe.load(path_deploy,path_caffe_alexnet, 'cudnn')
+
+	model=cudnn.convert(model,cudnn);
+	model:insert(nn.BatchNormalization(4096,1e-5,0.9,false),18);
+	model:insert(nn.BatchNormalization(4096,1e-5,0.9,false),16);
+	model:insert(nn.SpatialBatchNormalization(256,1e-5,0.9,false),12);
+	model:insert(nn.SpatialBatchNormalization(384,1e-5,0.9,false),10);
+	model:insert(nn.SpatialBatchNormalization(384,1e-5,0.9,false),8);
+	model:insert(nn.SpatialBatchNormalization(256,1e-5,0.9,false),5);
+	model:insert(nn.SpatialBatchNormalization(96,1e-5,0.9,false),2);
+	model:insert(nn.CAdd(1,3,1,1),1);
+	model:insert(nn.CMul(1,3,1,1),1);
+	model:insert(nn.SpatialBatchNormalization(3,1e-5,0.9,false),1);
+	model:add(nn.SoftMax());
+
+
+	-- print (model);
+
+	local file_names={'data_bn','data_scale','conv1_bn','conv2_bn','conv3_bn','conv4_bn','conv5_bn','fc6_bn','fc7_bn'};
+	local idx_layers={1,2,5,9,13,16,19,24,27}
+	for idx_file_name,file_name in ipairs(file_names) do
+
+		local idx_layer=idx_layers[idx_file_name];
+		local weight_file=paths.concat(path_dir,pre_path..file_name..'_weights.npy');
+		local bias_file=paths.concat(path_dir,pre_path..file_name..'_bias.npy');
+		local ma_file=paths.concat(path_dir,pre_path..file_name..'_avg.npy');
+		
+		local weights=npy4th.loadnpy(weight_file);
+		local bias=npy4th.loadnpy(bias_file);
+
+		if idx_layer==2 then
+			weights=weights:resize(1,3,1,1);
+			bias=bias:resize(1,3,1,1);
+			model:get(idx_layer).weight=weights:clone();
+			model:get(idx_layer+1).bias=bias:clone();
+		else
+			assert (model:get(idx_layer).running_mean:size(1)==weights:size(1));
+			assert (model:get(idx_layer).running_var:size(1)==bias:size(1));
+			
+			ma=npy4th.loadnpy(ma_file);
+			model:get(idx_layer).running_mean=weights:double():div(ma[1])
+			model:get(idx_layer).running_var=bias:double():div(ma[1])
+		end
+	end
+
+	return model;
 end
 
-model=model:cuda();
-model:evaluate();
+function sanityCheckAlexNetModel(model,test_file,numpy_file)
+	local test_file=test_file;
+	local numpy_file=numpy_file;
+	
+	if not test_file then
+		test_file='../data/train/ALB/img_01105.jpg';
+	end
 
-local test_file='../data/train/ALB/img_01105.jpg';
-local img=image.load(test_file)*255;
-local img = image.scale(img,227,227);
-local img_clone=img:clone();
-img[{1,{},{}}]=img_clone[{3,{},{}}]
-img[{3,{},{}}]=img_clone[{1,{},{}}]
+	if not numpy_file then
+		numpy_file='../models/test_caffe.npy';
+	end
 
-local input=torch.zeros(1,3,227,227);
-input[1]=img;
-input=input:cuda();
+	model=model:cuda();
+	model:evaluate();
 
-local output=model:forward(input);
+	local img=image.load(test_file)*255;
+	local img = image.scale(img,227,227);
+	local img_clone=img:clone();
+	img[{1,{},{}}]=img_clone[{3,{},{}}]
+	img[{3,{},{}}]=img_clone[{1,{},{}}]
 
-for i=1,#model do
-	print (model:get(i),torch.min(model:get(i).output),torch.max(model:get(i).output))
+	local input=torch.zeros(1,3,227,227);
+	input[1]=img;
+	input=input:cuda();
+
+	local output=model:forward(input);
+
+	for i=1,#model do
+		print (model:get(i),torch.min(model:get(i).output),torch.max(model:get(i).output))
+	end
+
+	caffe_out=npy4th.loadnpy(numpy_file);
+	print (caffe_out:size());
+	print (torch.min(output),torch.max(output));
+	print (torch.min(caffe_out),torch.max(caffe_out));
+	local diff=torch.abs(torch.csub(output:double(),caffe_out:double()));
+	print (torch.max(diff),torch.min(diff))
+	print (torch.mean(diff));
 end
 
-caffe_out=npy4th.loadnpy('../models/test_caffe.npy');
-print (caffe_out:size());
-print (torch.min(output),torch.max(output));
-print (torch.min(caffe_out),torch.max(caffe_out));
-local diff=torch.abs(torch.csub(output:double(),caffe_out:double()));
-print (torch.max(diff),torch.min(diff))
-print (torch.mean(diff));
+function saveAlexNetModifiedModel(model,out_file,num_classes,model_type)
+	local model_new={};
 
+	if model_type=='classifier_log' then
+		model:remove(#model);
+		model:remove(#model);
+		model_new=nn.Sequential();
+		model_new:add(nn.Linear(4096,num_classes));
+		model_new:add(nn.LogSoftMax());
+		model_new=makeXavierGaussian(model_new);
+	end
+
+	for layer_num=1,#model_new do
+		model:add(model_new:get(layer_num));
+	end
+
+	model:clearState();
+	torch.save(out_file,model);
+
+end
+
+
+function main()
+	local model=getAlexNetModel();
+	-- sanityCheckAlexNetModel(model);
+
+	local out_file='../models/alexnet_classifier_lastScratch_untrained.dat';
+	local model_type='classifier_log';
+	local num_classes=8;
+	saveAlexNetModifiedModel(model,out_file,num_classes,model_type);
+
+end
+
+main();
