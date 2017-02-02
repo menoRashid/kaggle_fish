@@ -9,6 +9,7 @@ npy4th=require 'npy4th';
 dump=require 'dump';
 require 'data_fish';
 visualize=require 'visualize';
+require 'csvigo';
 
 local fevalScore = function(x)
     if x ~= parameters then
@@ -28,6 +29,115 @@ local fevalScore = function(x)
     net:backward(batch_inputs, dloss)
     
     return loss, gradParameters;
+end
+
+
+function test(params)
+	print ('setting_threads');
+	torch.setnumthreads(1);
+
+	local net_file=params.model
+	if params.limit<0 then
+	    params.limit=nil;
+	end
+
+	val_data_path= params.test_data_path
+
+
+	local out_dir_images=params.outDirTest;
+	paths.mkdir(out_dir_images);
+
+	local out_file_loss_val=paths.concat(out_dir_images,'loss_final_val.npy');
+	local out_file_probs_csv=paths.concat(out_dir_images,'probs_per_file.csv');
+
+	local out_file_log=paths.concat(out_dir_images,'log_test.txt');
+	local logger=torch.DiskFile(out_file_log,'w');
+
+	logger:writeString(dump.tostring(params)..'\n');
+	cutorch.setDevice(params.gpu);
+	logger:writeString(dump.tostring('loading network')..'\n');
+	print ('loading network');
+	net=torch.load(params.model);
+	logger:writeString(dump.tostring('done loading network')..'\n');
+	print ('done loading network');
+	print (net);
+
+	logger:writeString(dump.tostring('making cuda')..'\n');
+	net = net:cuda();
+	net:evaluate();
+
+	logger:writeString(dump.tostring('done')..'\n');
+	logger:writeString(dump.tostring('loading params')..'\n');
+	parameters, gradParameters = net:getParameters()
+	logger:writeString(dump.tostring('loading done')..'\n');
+	logger:writeString(dump.tostring(optimState)..'\n');
+	
+	local criterion_weights=npy4th.loadnpy(params.weights_file);
+	local criterion=nn.CrossEntropyCriterion(criterion_weights)
+	criterion=criterion:cuda();
+
+	local log_layer=nn.SoftMax():cuda();
+
+	local data_params={file_path=val_data_path,
+					batch_size=params.batchSize,
+					augmentation=false,
+					limit=params.limit,
+	                input_size={params.inputSize,params.inputSize},
+	                crop_size={params.cropSize,params.cropSize}
+	                };
+
+	vd=data_fish(data_params);
+
+	local val_losses = {};
+	local csv_data={};
+
+	csv_data[1]={'image','ALB','BET','DOL','LAG','NoF','OTHER','SHARK','YFT'};
+
+	for i=1,params.iterations do
+
+		vd:getTrainingData();
+
+
+
+		vd.training_set.data=vd.training_set.data:cuda();
+		vd.training_set.label=vd.training_set.label:cuda();
+		local batch_inputs=vd.training_set.data;
+		local batch_targets=vd.training_set.label;
+
+		gradParameters:zero()
+		local outputs=net:forward(batch_inputs);
+		local loss= criterion:forward(outputs,batch_targets);
+
+		val_losses[#val_losses+1]=loss;
+		local probs=log_layer:forward(outputs);
+		
+		for line_num=1,probs:size(1) do
+			if (#csv_data<(#vd.lines_data+1)) then
+				local path_im=paths.basename(vd.training_set.input[line_num]);
+				local row_curr={path_im};
+				for pred_num=1,probs:size(2) do
+					local str=string.format("%6.20f",probs[{line_num,pred_num}]);
+					row_curr[#row_curr+1]=str;
+				end
+				csv_data[#csv_data+1]=row_curr;
+			end
+		end
+
+		disp_str=string.format("minibatches processed: %6s, val loss = %6.6f", i, val_losses[#val_losses])
+		logger:writeString(dump.tostring(disp_str)..'\n');
+		print(disp_str)
+	end
+
+	assert ((#csv_data-1)==#vd.lines_data);
+	csvigo.save{data=csv_data,path=out_file_probs_csv}
+	    
+	val_losses=torch.Tensor(val_losses);
+	disp_str=string.format("minibatches processed: all, val loss = %6.6f", torch.mean(val_losses))
+	logger:writeString(dump.tostring(disp_str)..'\n');
+	print (params.model)
+	print(disp_str)
+
+	npy4th.savenpy(out_file_loss_val, val_losses)
 end
 
 function main(params) 
@@ -255,13 +365,14 @@ cmd:option('decreaseAfter',50*epoch_size);
 cmd:option('-gpu',1,'gpu to run the training on');
 cmd:text()
 
-cmd:option('-outDir','/home/SSD3/maheen-data/fish_experiments/train_alexnet/150_50_1e-2');
+cmd:option('-outDir','/home/SSD3/maheen-data/fish_experiments/train_alexnet/150_50_1e-3');
 params = cmd:parse(arg)
-main(params);
+-- main(params);
 
--- cmd:option('-iterations',2,'num of iterations to run');
--- cmd:option('-batchSize',100,'batch size');
--- cmd:option('-outDirTest',paths.concat(params.outDir,'test_images'));
--- cmd:option('-model',paths.concat(params.outDir,'final/model_all_final.dat'));
--- params = cmd:parse(arg)
--- test(params);
+cmd:option('-iterations',10,'num of iterations to run');
+cmd:option('-batchSize',100,'batch size');
+cmd:option('-outDirTest',paths.concat(params.outDir,'test_images'));
+cmd:option('-test_data_path','../data/test_256.txt')
+cmd:option('-model',paths.concat(params.outDir,'final/model_all_final.dat'));
+params = cmd:parse(arg)
+test(params);
